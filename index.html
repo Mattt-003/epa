@@ -10,7 +10,7 @@
 <title>GLITCH LAB — Cámara en tiempo real</title>
 <link rel="manifest" href="manifest.json">
 <style>
-  /* ========== CSS embebido — Safari iOS no lo cachea por separado ========== */
+  /* ========== CSS embebido (Safari iOS no lo cachea por separado) ========== */
   * { box-sizing: border-box; margin: 0; padding: 0; }
   html { height: 100%; overflow: hidden; touch-action: manipulation; -webkit-touch-callout: none; }
   body {
@@ -48,7 +48,7 @@
     min-height: 300px;
     max-height: 450px;
     background: #000;
-    border: 3px solid #ff0055;   /* borde rojo para que sepas que está cargado */
+    border: 3px solid #ff0055;
     border-radius: 12px;
     margin: 12px env(safe-area-inset-left, 10px) 8px env(safe-area-inset-right, 10px);
     position: relative;
@@ -253,7 +253,7 @@
 </div>
 
 <script>
-// ==================== SHADERS (GLSL ES 3.00) ====================
+/* ==================== SHADERS (GLSL ES 3.00) ==================== */
 const SHADERS = {
   vertex: `#version 300 es
 in vec2 a_position;
@@ -326,7 +326,7 @@ void main(){
 `
 };
 
-// ==================== APP ====================
+/* ==================== APP ==================== */
 (function(){
   'use strict';
   const $ = (id)=>document.getElementById(id);
@@ -549,7 +549,7 @@ void main(){
   bindSlider('sSlideY',v=>state.slideTargetY=v);
   bindSlider('sSlideSmooth',v=>state.slideSmooth=v);
 
-  // ==================== GRABACIÓN ====================
+  /* ==================== GRABACIÓN ==================== */
   function toggleRecording(){
     if(state.recording) stopRecording(); else startRecording();
   }
@@ -584,7 +584,7 @@ void main(){
   }
   $('btnRecord').addEventListener('click',toggleRecording);
 
-  // ==================== PRESETS (IndexedDB) ====================
+  /* ==================== PRESETS (IndexedDB) ==================== */
   const DB_NAME='glitch-lab', DB_VER=1, DB_STORE='presets';
   function dbOpen(){ return new Promise((res,rej)=>{ const r=indexedDB.open(DB_NAME,DB_VER); r.onupgradeneeded=()=>r.result.createObjectStore(DB_STORE,{keyPath:'id',autoIncrement:true}); r.onsuccess=()=>res(r.result); r.onerror=()=>rej(r.error); }); }
   function presetSave(s){ return dbOpen().then(db=>new Promise((res,rej)=>{ const tx=db.transaction(DB_STORE,'readwrite'); const store=tx.objectStore(DB_STORE); const req=store.add({...s,createdAt:Date.now()}); req.onsuccess=()=>res(req.result); req.onerror=()=>rej(req.error); tx.oncomplete=()=>db.close(); })); }
@@ -620,14 +620,14 @@ void main(){
   $('btnSavePreset').addEventListener('click',async()=>{ await presetSave(capturePreset()); renderPresets(); });
   $('btnLoadPreset').addEventListener('click',renderPresets);
 
-  // ==================== PWA INSTALL ====================
+  /* ==================== PWA INSTALL ==================== */
   let deferred=null;
   const overlay=$('overlayInstall'), btnInstall=$('btnInstall'), btnClose=$('btnCloseInstall');
   window.addEventListener('beforeinstallprompt',e=>{ e.preventDefault(); deferred=e; overlay.classList.remove('hidden'); });
   btnInstall.addEventListener('click',async()=>{ if(deferred){ deferred.prompt(); const c=await deferred.userChoice; if(c.outcome==='accepted') overlay.classList.add('hidden'); deferred=null; } });
   btnClose.addEventListener('click',()=>overlay.classList.add('hidden'));
 
-  // ==================== INICIO ====================
+  /* ==================== INICIO ==================== */
   $('btnStart').addEventListener('click',initCamera);
   if(!gl){
     statusList.innerHTML+='<li style="color:#ff2a6d">WebGL 2 no detectado.</li>';
