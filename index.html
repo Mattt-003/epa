@@ -7,7 +7,7 @@
 <meta name="apple-mobile-web-app-status-bar-style" content="#0a0a0a">
 <meta name="apple-mobile-web-app-title" content="GLITCH LAB">
 <meta name="theme-color" content="#0a0a0a">
-<title>GLITCH LAB — Efectos de cámara en tiempo real</title>
+<title>GLITCH LAB — Cámara en tiempo real</title>
 <link rel="manifest" href="manifest.json">
 <style>
   /* ========== CSS embebido — Safari iOS no lo cachea por separado ========== */
@@ -40,15 +40,15 @@
   .hud-item.rec { color: #ff2a6d; }
   .hud-item.rec.hidden { display: none; }
 
-  /* VICTOR: visor arriba, bien visible, borde rojo para saber que cargó el CSS */
+  /* VICTOR: visor arriba, bien visible */
   #camera-wrap {
     flex-shrink: 0;
     width: 100%;
-    height: 52vh;           /* altura suficiente en iPhone */
+    height: 52vh;
     min-height: 300px;
     max-height: 450px;
     background: #000;
-    border: 3px solid #ff0055;   /* borde rojo temporal para verificar */
+    border: 3px solid #ff0055;   /* borde rojo para que sepas que está cargado */
     border-radius: 12px;
     margin: 12px env(safe-area-inset-left, 10px) 8px env(safe-area-inset-right, 10px);
     position: relative;
@@ -61,11 +61,12 @@
   #cameraVideo { opacity: 0; }
   #glCanvas { border: 2px solid rgba(0,242,255,0.5); }
 
-  /* Controles debajo, scrollables */
+  /* Controles debajo, SCROLLABLE en iPhone */
   #controls {
     flex: 1 1 auto;
     overflow-y: auto;
     -webkit-overflow-scrolling: touch;
+    min-height: 0;   /* CRÍTICO: sin esto iOS no deja hacer scroll en flex */
     padding: 8px env(safe-area-inset-left, 10px) 16px env(safe-area-inset-right, 10px);
     padding-bottom: env(safe-area-inset-bottom, 16px);
     background: #0a0a0a;
@@ -117,6 +118,7 @@
   }
   #status-list { margin: 0; padding-left: 16px; color: #888; font-size: 12px; line-height: 1.5; }
   #status-list li { margin: 2px 0; }
+  #camStatus { color: #ff6666; font-size: 12px; margin-top: 8px; font-weight: bold; min-height: 1.2em; }
 
   /* Overlay instalación */
   .overlay {
@@ -139,7 +141,7 @@
   @media (min-width: 768px) {
     body { flex-direction: row; padding: 24px; align-items: flex-start; overflow-y: auto; }
     #camera-wrap { width: 42vw; max-width: 520px; margin: 0; height: auto; aspect-ratio: 9/16; }
-    #controls { width: 340px; overflow-y: auto; padding-bottom: 0; }
+    #controls { width: 340px; overflow-y: auto; padding-bottom: 0; min-height: 0; }
     header.app-header { position: sticky; top: 16px; }
   }
 </style>
@@ -180,6 +182,7 @@
         <option value="0.5">1:2 — máxima fluidez</option>
       </select>
     </label></div>
+    <div id="camStatus"></div>
   </section>
 
   <section class="panel" id="panelIsolate">
@@ -249,7 +252,389 @@
   </div>
 </div>
 
-<script src="js/shaders.js"></script>
-<script src="js/app.js"></script>
+<script>
+// ==================== SHADERS (GLSL ES 3.00) ====================
+const SHADERS = {
+  vertex: `#version 300 es
+in vec2 a_position;
+in vec2 a_texCoord;
+out vec2 v_uv;
+void main() {
+  gl_Position = vec4(a_position, 0.0, 1.0);
+  v_uv = a_texCoord;
+}
+`,
+
+  fragment: `#version 300 es
+precision highp float;
+uniform sampler2D u_sampler;
+uniform sampler2D u_prev;
+uniform sampler2D u_noise;
+uniform vec2  u_resolution;
+uniform vec2  u_uvScale;
+uniform vec2  u_uvOffset;
+uniform vec2  u_slide;
+uniform float u_time;
+uniform float u_luma;
+uniform float u_threshold;
+uniform float u_noiseAmt;
+uniform float u_mosaic;
+uniform float u_trackSens;
+uniform float u_shapeMotion;
+uniform float u_flicker;
+uniform vec2  u_trackPos;
+uniform int   u_invert;
+in vec2 v_uv;
+out vec4 outColor;
+float hash(vec2 p){ return fract(sin(dot(p,vec2(127.1,311.7)))*43758.5453); }
+float noise(vec2 p){
+  vec2 i=floor(p), f=fract(p); f=f*f*(3.0-2.0*f);
+  float a=hash(i+vec2(0,0)), b=hash(i+vec2(1,0));
+  float c=hash(i+vec2(0,1)), d=hash(i+vec2(1,1));
+  return mix(mix(a,b,f.x),mix(c,d,f.x),f.y);
+}
+void main(){
+  vec2 uv=(v_uv-u_uvOffset)*u_uvScale;
+  vec4 curr=texture(u_sampler,fract(uv+u_slide));
+  vec4 prev=texture(u_prev,fract(uv+u_slide));
+  float luma=dot(curr.rgb,vec3(0.299,0.587,0.114));
+  float motion=length(curr.rgb-prev.rgb);
+  float lumaKey=luma+(noise(uv*8.0+u_time*2.0)*2.0-1.0)*u_noiseAmt*0.5;
+  float mask=smoothstep(u_threshold,u_threshold+0.07,lumaKey);
+  if(u_invert==1) mask=1.0-mask;
+  vec3 iso=mix(vec3(0.035,0.035,0.045),curr.rgb,mask);
+  float sceneLight=u_luma;
+  float blockSize=max(1.0,mix(1.0,80.0,u_mosaic*(1.0-sceneLight*0.5+luma*0.5)));
+  vec2 grid=floor(uv*blockSize)/blockSize;
+  vec4 mos=texture(u_sampler,fract((grid+u_slide)*u_uvScale+u_uvOffset));
+  float mosaicWeight=clamp(u_mosaic*(1.0-luma*0.7-sceneLight*0.3),0.0,1.0);
+  iso=mix(iso,mos.rgb,mosaicWeight);
+  float trackPull=u_trackSens*sceneLight*0.55;
+  vec2 toTrack=u_trackPos-uv;
+  vec4 trk=texture(u_sampler,fract(uv+toTrack*trackPull*0.5+u_slide));
+  iso=mix(iso,trk.rgb,clamp(trackPull*0.7,0.0,1.0));
+  float shapeAmt=motion*u_shapeMotion*0.018;
+  vec2 shapeOffset=vec2(sin(uv.y*70.0+u_time)*shapeAmt,cos(uv.x*70.0+u_time)*shapeAmt);
+  vec4 shp=texture(u_sampler,fract(uv+shapeOffset+u_slide));
+  iso=mix(iso,shp.rgb,clamp(shapeAmt*3.0,0.0,1.0));
+  float flickWave=1.0+(noise(vec2(u_time*9.0,uv.x+uv.y))-0.5)*2.0*u_flicker*(0.4+luma*0.6+motion*2.0);
+  iso*=flickWave;
+  vec3 grain=texture(u_noise,uv*6.0+u_time*0.4).rgb;
+  iso+=grain*u_noiseAmt*0.14;
+  outColor=vec4(iso,1.0);
+}
+`
+};
+
+// ==================== APP ====================
+(function(){
+  'use strict';
+  const $ = (id)=>document.getElementById(id);
+  const canvas=$('glCanvas');
+  const video=$('cameraVideo');
+  const gl=canvas.getContext('webgl2',{alpha:false,depth:false,stencil:false,antialias:false,premultipliedAlpha:false});
+  const hudFps=$('hudFps'), hudLuma=$('hudLuma'), hudRes=$('hudRes'), hudRec=$('hudRec');
+  const statusList=$('statusList');
+  const camStatus=$('camStatus');
+
+  function initStatus(){
+    const items=[
+      gl?'WebGL 2: disponible (GPU)':'WebGL 2: NO disponible',
+      'Cámara: getUserMedia (iOS entrega H.264/HEVC; no ProRes ni Apple Log vía PWA)',
+      'Metal: acceso indirecto vía WebGL (Safari/iOS), no directo desde JS',
+      '4K/60 FPS con todos los efectos: no garantizado; depende del estado térmico del iPhone',
+      'Datamosh auténtico de compresión: NO implementado (un shader no es datamosh real)',
+      'Róscopia real con ML (borrado de fondo): NO incluida; usa llave de luminancia (luma key)',
+      'Instalación PWA en iPhone: requiere HTTPS (GitHub Pages lo da gratis)'
+    ];
+    statusList.innerHTML=items.map(t=>`<li>${t}</li>`).join('');
+  }
+  initStatus();
+
+  function compileShader(type,src){
+    const s=gl.createShader(type); gl.shaderSource(s,src); gl.compileShader(s);
+    if(!gl.getShaderParameter(s,gl.COMPILE_STATUS)){ console.error(gl.getShaderInfoLog(s)); gl.deleteShader(s); return null; }
+    return s;
+  }
+  function createProgram(vs,fs){
+    const p=gl.createProgram(); gl.attachShader(p,compileShader(gl.VERTEX_SHADER,vs)); gl.attachShader(p,compileShader(gl.FRAGMENT_SHADER,fs)); gl.linkProgram(p);
+    if(!gl.getProgramParameter(p,gl.LINK_STATUS)){ console.error(gl.getProgramInfoLog(p)); return null; }
+    return p;
+  }
+  function createTexture(w,h){
+    const t=gl.createTexture(); gl.bindTexture(gl.TEXTURE_2D,t);
+    gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MIN_FILTER,gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MAG_FILTER,gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_S,gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_T,gl.CLAMP_TO_EDGE);
+    gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA,w,h,0,gl.RGBA,gl.UNSIGNED_BYTE,null);
+    return t;
+  }
+  function genNoise(){
+    const s=256; const d=new Uint8Array(s*s*4);
+    for(let i=0;i<d.length;i+=4){ const v=Math.random()*255; d[i]=v;d[i+1]=v;d[i+2]=v;d[i+3]=255; }
+    const t=gl.createTexture(); gl.bindTexture(gl.TEXTURE_2D,t);
+    gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MIN_FILTER,gl.NEAREST);
+    gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MAG_FILTER,gl.NEAREST);
+    gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_S,gl.REPEAT);
+    gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_WRAP_T,gl.REPEAT);
+    gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA,s,s,0,gl.RGBA,gl.UNSIGNED_BYTE,d);
+    return t;
+  }
+
+  const state={
+    started:false, facing:'environment', quality:'1080', renderScale:0.75,
+    stream:null, videoW:0, videoH:0,
+    threshold:0.55, noiseAmt:0.18, invert:false, mosaic:0.45, mosaicSens:0.70,
+    trackSens:0.50, shapeMotion:0.65, flicker:0.30, slideX:0, slideY:0, slideSmooth:0.50,
+    slideTargetX:0, slideTargetY:0,
+    luma:0.5, trackX:0.5, trackY:0.5,
+    lastTime:0, fps:0, recording:false, mediaRecorder:null, recordedChunks:[],
+    gl:null, prog:null, texCurrent:null, texPrev:null, texNoise:null, loc:{}, raf:null
+  };
+
+  const qualityMap={'720':{w:1280,h:720},'1080':{w:1920,h:1080},'2160':{w:3840,h:2160}};
+  const STORY_W=1080, STORY_H=1920;
+
+  function resizeCanvas(){
+    const scale=parseFloat($('selRenderScale').value||0.75);
+    state.renderScale=scale;
+    canvas.width=Math.round(STORY_W*scale); canvas.height=Math.round(STORY_H*scale);
+    $('hudRes').textContent=`${canvas.width}×${canvas.height}`;
+    if(gl){ gl.viewport(0,0,canvas.width,canvas.height); gl.clearColor(0,0,0,1); gl.clear(gl.COLOR_BUFFER_BIT); }
+  }
+
+  async function initCamera(){
+    const q=qualityMap[state.quality]||qualityMap['1080'];
+    try{
+      const constraints={video:{facingMode:state.facing,width:{ideal:q.w,max:q.w},height:{ideal:q.h,max:q.h},frameRate:{ideal:30,max:60}},audio:false};
+      state.stream=await navigator.mediaDevices.getUserMedia(constraints);
+      video.srcObject=state.stream;
+      await video.play();
+      video.onloadedmetadata=()=>{
+        state.videoW=video.videoWidth||q.w; state.videoH=video.videoHeight||q.h;
+        resizeCanvas();
+        state.started=true;
+        $('btnStart').textContent='Cámara activa'; $('btnStart').classList.add('btn-primary'); $('btnStart').disabled=true;
+        camStatus.textContent='';
+        state.lastTime=performance.now();
+        if(state.raf) cancelAnimationFrame(state.raf);
+        state.raf=requestAnimationFrame(loop);
+      };
+    }catch(e){
+      console.error(e);
+      camStatus.textContent='Error de cámara: concede permiso en Safari y usa HTTPS.';
+      $('btnStart').disabled=false;
+    }
+  }
+
+  $('btnToggleCam').addEventListener('click',async()=>{
+    state.facing=state.facing==='environment'?'user':'environment';
+    if(state.stream) state.stream.getTracks().forEach(t=>t.stop());
+    state.started=false; $('btnStart').textContent='Iniciar cámara'; $('btnStart').classList.remove('btn-primary'); $('btnStart').disabled=false;
+    await initCamera();
+  });
+
+  $('selQuality').addEventListener('change',(e)=>{ state.quality=e.target.value; if(state.started){ if(state.stream) state.stream.getTracks().forEach(t=>t.stop()); state.started=false; $('btnStart').textContent='Iniciar cámara'; $('btnStart').classList.remove('btn-primary'); $('btnStart').disabled=false; } });
+  $('selRenderScale').addEventListener('change',resizeCanvas);
+
+  function initGL(){
+    if(!gl) return false;
+    state.prog=createProgram(SHADERS.vertex,SHADERS.fragment);
+    if(!state.prog) return false;
+    gl.useProgram(state.prog);
+    const posBuf=gl.createBuffer(); gl.bindBuffer(gl.ARRAY_BUFFER,posBuf);
+    gl.bufferData(gl.ARRAY_BUFFER,new Float32Array([-1,-1,1,-1,-1,1,1,1]),gl.STATIC_DRAW);
+    const lp=gl.getAttribLocation(state.prog,'a_position'); gl.enableVertexAttribArray(lp); gl.vertexAttribPointer(lp,2,gl.FLOAT,false,0,0);
+    const tcBuf=gl.createBuffer(); gl.bindBuffer(gl.ARRAY_BUFFER,tcBuf);
+    gl.bufferData(gl.ARRAY_BUFFER,new Float32Array([0,1,1,1,0,0,1,0]),gl.STATIC_DRAW);
+    const lt=gl.getAttribLocation(state.prog,'a_texCoord'); gl.enableVertexAttribArray(lt); gl.vertexAttribPointer(lt,2,gl.FLOAT,false,0,0);
+    state.texCurrent=createTexture(canvas.width,canvas.height);
+    state.texPrev=createTexture(canvas.width,canvas.height);
+    state.texNoise=genNoise();
+    const L=state.loc;
+    L.sampler=gl.getUniformLocation(state.prog,'u_sampler');
+    L.prev=gl.getUniformLocation(state.prog,'u_prev');
+    L.noise=gl.getUniformLocation(state.prog,'u_noise');
+    L.resolution=gl.getUniformLocation(state.prog,'u_resolution');
+    L.uvScale=gl.getUniformLocation(state.prog,'u_uvScale');
+    L.uvOffset=gl.getUniformLocation(state.prog,'u_uvOffset');
+    L.slide=gl.getUniformLocation(state.prog,'u_slide');
+    L.time=gl.getUniformLocation(state.prog,'u_time');
+    L.luma=gl.getUniformLocation(state.prog,'u_luma');
+    L.threshold=gl.getUniformLocation(state.prog,'u_threshold');
+    L.noiseAmt=gl.getUniformLocation(state.prog,'u_noiseAmt');
+    L.mosaic=gl.getUniformLocation(state.prog,'u_mosaic');
+    L.trackSens=gl.getUniformLocation(state.prog,'u_trackSens');
+    L.shapeMotion=gl.getUniformLocation(state.prog,'u_shapeMotion');
+    L.flicker=gl.getUniformLocation(state.prog,'u_flicker');
+    L.trackPos=gl.getUniformLocation(state.prog,'u_trackPos');
+    L.invert=gl.getUniformLocation(state.prog,'u_invert');
+    gl.disable(gl.BLEND);
+    return true;
+  }
+
+  const analysisCanvas=document.createElement('canvas'); analysisCanvas.width=64; analysisCanvas.height=64;
+  const actx=analysisCanvas.getContext('2d',{willReadFrequently:true});
+  function analyzeFrame(){
+    actx.drawImage(video,0,0,64,64);
+    const data=actx.getImageData(0,0,64,64).data;
+    const len=data.length/4;
+    let sum=0, wx=0, wy=0, wsum=0;
+    for(let i=0;i<data.length;i+=4){
+      const l=0.299*data[i]+0.587*data[i+1]+0.114*data[i+2];
+      sum+=l;
+      if(l>140){ const cx=(i/4)%64, cy=Math.floor((i/4)/64); wx+=cx*l; wy+=cy*l; wsum+=l; }
+    }
+    state.luma=sum/(len*255);
+    $('hudLuma').textContent=(state.luma*100).toFixed(0)+'%';
+    if(wsum>0){
+      const tx=wx/wsum/64, ty=wy/wsum/64, s=state.trackSens;
+      state.trackX=state.trackX*(1-s)+tx*s;
+      state.trackY=state.trackY*(1-s)+ty*s;
+    }
+  }
+
+  function loop(now){
+    if(!state.started) return;
+    const dt=now-state.lastTime; state.lastTime=now;
+    state.fps=0.9*state.fps+0.1*(1000/Math.max(dt,1));
+    $('hudFps').textContent=state.fps.toFixed(0);
+    analyzeFrame();
+    gl.bindTexture(gl.TEXTURE_2D,state.texCurrent);
+    gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA,gl.RGBA,gl.UNSIGNED_BYTE,video);
+    const vAspect=state.videoW/state.videoH, cAspect=canvas.width/canvas.height;
+    const sx=canvas.width/state.videoW, sy=canvas.height/state.videoH, s=Math.max(sx,sy);
+    const uvScaleX=(state.videoW*s)/canvas.width, uvScaleY=(state.videoH*s)/canvas.height;
+    const uvOffX=((state.videoW*s)-canvas.width)/(2*state.videoW*s), uvOffY=((state.videoH*s)-canvas.height)/(2*state.videoH*s);
+    state.slideX+=(state.slideTargetX-state.slideX)*state.slideSmooth;
+    state.slideY+=(state.slideTargetY-state.slideY)*state.slideSmooth;
+    gl.useProgram(state.prog); gl.viewport(0,0,canvas.width,canvas.height);
+    gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D,state.texCurrent); gl.uniform1i(state.loc.sampler,0);
+    gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D,state.texPrev); gl.uniform1i(state.loc.prev,1);
+    gl.activeTexture(gl.TEXTURE2); gl.bindTexture(gl.TEXTURE_2D,state.texNoise); gl.uniform1i(state.loc.noise,2);
+    gl.uniform2f(state.loc.resolution,canvas.width,canvas.height);
+    gl.uniform2f(state.loc.uvScale,uvScaleX,uvScaleY);
+    gl.uniform2f(state.loc.uvOffset,uvOffX,uvOffY);
+    gl.uniform2f(state.loc.slide,state.slideX,state.slideY);
+    gl.uniform1f(state.loc.time,now*0.001);
+    gl.uniform1f(state.loc.luma,state.luma);
+    gl.uniform1f(state.loc.threshold,state.threshold);
+    gl.uniform1f(state.loc.noiseAmt,state.noiseAmt);
+    gl.uniform1f(state.loc.mosaic,state.mosaic);
+    gl.uniform1f(state.loc.trackSens,state.trackSens);
+    gl.uniform1f(state.loc.shapeMotion,state.shapeMotion);
+    gl.uniform1f(state.loc.flicker,state.flicker);
+    gl.uniform2f(state.loc.trackPos,state.trackX,state.trackY);
+    gl.uniform1i(state.loc.invert,state.invert?1:0);
+    gl.drawArrays(gl.TRIANGLE_STRIP,0,4);
+    gl.bindTexture(gl.TEXTURE_2D,state.texPrev);
+    gl.copyTexSubImage2D(gl.TEXTURE_2D,0,0,0,0,0,canvas.width,canvas.height);
+    state.raf=requestAnimationFrame(loop);
+  }
+
+  function bindSlider(id,setter){
+    const el=$(id), ve=$(id.replace('s','v'));
+    el.addEventListener('input',(e)=>{ const v=parseFloat(e.target.value); setter(v); if(ve) ve.textContent=v.toFixed(2); });
+  }
+  bindSlider('sThreshold',v=>state.threshold=v);
+  bindSlider('sNoiseAmt',v=>state.noiseAmt=v);
+  $('ckInvert').addEventListener('change',e=>state.invert=e.target.checked);
+  bindSlider('sMosaic',v=>state.mosaic=v);
+  bindSlider('sMosaicSens',v=>state.mosaicSens=v);
+  bindSlider('sTrackSens',v=>state.trackSens=v);
+  bindSlider('sShapeMotion',v=>state.shapeMotion=v);
+  bindSlider('sFlicker',v=>state.flicker=v);
+  bindSlider('sSlideX',v=>state.slideTargetX=v);
+  bindSlider('sSlideY',v=>state.slideTargetY=v);
+  bindSlider('sSlideSmooth',v=>state.slideSmooth=v);
+
+  // ==================== GRABACIÓN ====================
+  function toggleRecording(){
+    if(state.recording) stopRecording(); else startRecording();
+  }
+  async function startRecording(){
+    if(!canvas.captureStream){ alert('canvas.captureStream no disponible'); return; }
+    try{
+      const stream=canvas.captureStream(30);
+      let mime='video/webm; codecs=vp8';
+      if(!MediaRecorder.isTypeSupported(mime)) mime='video/webm';
+      if(!MediaRecorder.isTypeSupported(mime)) mime='';
+      state.mediaRecorder=new MediaRecorder(stream,mime?{mimeType:mime}:undefined);
+      state.recordedChunks=[];
+      state.mediaRecorder.ondataavailable=e=>{ if(e.data.size) state.recordedChunks.push(e.data); };
+      state.mediaRecorder.onstop=()=>{
+        const blob=new Blob(state.recordedChunks,{type:state.mediaRecorder.mimeType||'video/webm'});
+        const url=URL.createObjectURL(blob);
+        const a=document.createElement('a'); a.href=url; a.download=`glitch-lab-${Date.now()}.webm`;
+        document.body.appendChild(a); a.click(); document.body.removeChild(a); URL.revokeObjectURL(url);
+      };
+      state.mediaRecorder.start(1000);
+      state.recording=true; state.mediaRecorder.stream=stream;
+      $('btnRecord').textContent='■ Detener grabación'; $('btnRecord').classList.add('recording');
+      hudRec.classList.remove('hidden');
+    }catch(e){ console.error(e); alert('No se pudo grabar.'); }
+  }
+  function stopRecording(){
+    if(state.mediaRecorder&&state.mediaRecorder.state==='recording') state.mediaRecorder.stop();
+    state.mediaRecorder&&state.mediaRecorder.stream.getTracks().forEach(t=>t.stop());
+    state.recording=false;
+    $('btnRecord').textContent='● Grabar historia (9:16)'; $('btnRecord').classList.remove('recording');
+    hudRec.classList.add('hidden');
+  }
+  $('btnRecord').addEventListener('click',toggleRecording);
+
+  // ==================== PRESETS (IndexedDB) ====================
+  const DB_NAME='glitch-lab', DB_VER=1, DB_STORE='presets';
+  function dbOpen(){ return new Promise((res,rej)=>{ const r=indexedDB.open(DB_NAME,DB_VER); r.onupgradeneeded=()=>r.result.createObjectStore(DB_STORE,{keyPath:'id',autoIncrement:true}); r.onsuccess=()=>res(r.result); r.onerror=()=>rej(r.error); }); }
+  function presetSave(s){ return dbOpen().then(db=>new Promise((res,rej)=>{ const tx=db.transaction(DB_STORE,'readwrite'); const store=tx.objectStore(DB_STORE); const req=store.add({...s,createdAt:Date.now()}); req.onsuccess=()=>res(req.result); req.onerror=()=>rej(req.error); tx.oncomplete=()=>db.close(); })); }
+  function presetList(){ return dbOpen().then(db=>new Promise((res,rej)=>{ const tx=db.transaction(DB_STORE,'readonly'); const store=tx.objectStore(DB_STORE); const req=store.getAll(); req.onsuccess=()=>res(req.result); req.onerror=()=>rej(req.error); tx.oncomplete=()=>db.close(); })); }
+  function presetDelete(id){ return dbOpen().then(db=>new Promise((res,rej)=>{ const tx=db.transaction(DB_STORE,'readwrite'); tx.objectStore(DB_STORE).delete(id); tx.onsuccess=()=>res(); tx.onerror=()=>rej(tx.error); tx.oncomplete=()=>db.close(); })); }
+  function capturePreset(){ return { name:'Preset '+new Date().toLocaleString(), threshold:state.threshold, noiseAmt:state.noiseAmt, invert:state.invert, mosaic:state.mosaic, trackSens:state.trackSens, shapeMotion:state.shapeMotion, flicker:state.flicker, slideX:state.slideTargetX, slideY:state.slideTargetY }; }
+  function applyPreset(p){
+    state.threshold=p.threshold; state.noiseAmt=p.noiseAmt; state.invert=p.invert||false; state.mosaic=p.mosaic;
+    state.trackSens=p.trackSens; state.shapeMotion=p.shapeMotion; state.flicker=p.flicker;
+    state.slideTargetX=p.slideX; state.slideTargetY=p.slideY;
+    $('sThreshold').value=p.threshold; $('vThreshold').textContent=p.threshold.toFixed(2);
+    $('sNoiseAmt').value=p.noiseAmt; $('vNoiseAmt').textContent=p.noiseAmt.toFixed(2);
+    $('ckInvert').checked=!!p.invert;
+    $('sMosaic').value=p.mosaic; $('vMosaic').textContent=p.mosaic.toFixed(2);
+    $('sTrackSens').value=p.trackSens; $('vTrackSens').textContent=p.trackSens.toFixed(2);
+    $('sShapeMotion').value=p.shapeMotion; $('vShapeMotion').textContent=p.shapeMotion.toFixed(2);
+    $('sFlicker').value=p.flicker; $('vFlicker').textContent=p.flicker.toFixed(2);
+    $('sSlideX').value=p.slideX; $('vSlideX').textContent=p.slideX.toFixed(2);
+    $('sSlideY').value=p.slideY; $('vSlideY').textContent=p.slideY.toFixed(2);
+  }
+  async function renderPresets(){
+    try{
+      const ps=await presetList(); const list=$('presetList'); list.innerHTML='';
+      ps.forEach(p=>{
+        const w=document.createElement('div'); w.style.display='flex'; w.style.gap='6px'; w.style.marginBottom='6px';
+        w.innerHTML=`<button class="btn btn-sm" data-load="${p.id}" style="flex:1">${p.name}</button><button class="btn btn-sm" data-del="${p.id}" style="width:28px">×</button>`;
+        w.querySelector(`[data-load="${p.id}"]`).addEventListener('click',()=>applyPreset(p));
+        w.querySelector(`[data-del="${p.id}"]`).addEventListener('click',async()=>{ await presetDelete(p.id); renderPresets(); });
+        list.appendChild(w);
+      });
+    }catch(e){ console.warn('IndexedDB no disponible:',e); }
+  }
+  $('btnSavePreset').addEventListener('click',async()=>{ await presetSave(capturePreset()); renderPresets(); });
+  $('btnLoadPreset').addEventListener('click',renderPresets);
+
+  // ==================== PWA INSTALL ====================
+  let deferred=null;
+  const overlay=$('overlayInstall'), btnInstall=$('btnInstall'), btnClose=$('btnCloseInstall');
+  window.addEventListener('beforeinstallprompt',e=>{ e.preventDefault(); deferred=e; overlay.classList.remove('hidden'); });
+  btnInstall.addEventListener('click',async()=>{ if(deferred){ deferred.prompt(); const c=await deferred.userChoice; if(c.outcome==='accepted') overlay.classList.add('hidden'); deferred=null; } });
+  btnClose.addEventListener('click',()=>overlay.classList.add('hidden'));
+
+  // ==================== INICIO ====================
+  $('btnStart').addEventListener('click',initCamera);
+  if(!gl){
+    statusList.innerHTML+='<li style="color:#ff2a6d">WebGL 2 no detectado.</li>';
+    camStatus.textContent='WebGL 2 no disponible en este navegador.';
+  }
+  window.GLITCH_LAB={state,toggleRecording,applyPreset,renderPresets};
+})();
+</script>
 </body>
 </html>
