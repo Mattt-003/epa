@@ -9,118 +9,247 @@
 <meta name="theme-color" content="#0a0a0a">
 <title>GLITCH LAB — Efectos de cámara en tiempo real</title>
 <link rel="manifest" href="manifest.json">
-<link rel="preload" as="style" href="css/style.css">
-<link rel="stylesheet" href="css/style.css">
+<style>
+  /* ========== CSS embebido — Safari iOS no lo cachea por separado ========== */
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html { height: 100%; overflow: hidden; touch-action: manipulation; -webkit-touch-callout: none; }
+  body {
+    margin: 0; background: #0a0a0a; color: #fff;
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    font-size: 14px; height: 100%; overflow: hidden;
+    display: flex; flex-direction: column;
+    -webkit-tap-highlight-color: transparent;
+  }
+
+  /* Header arriba (respetando notch / dynamic island) */
+  header.app-header {
+    position: sticky; top: env(safe-area-inset-top, 0);
+    z-index: 50; flex-shrink: 0;
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 10px 14px;
+    background: rgba(10, 10, 10, 0.95);
+    border-bottom: 1px solid #222;
+    backdrop-filter: blur(10px);
+  }
+  .brand { font-weight: 800; letter-spacing: 2px; font-size: 16px; color: #00f2ff; }
+  .ver { font-weight: 400; font-size: 11px; opacity: 0.6; }
+  .hud { display: flex; gap: 10px; flex-wrap: wrap; }
+  .hud-item { display: flex; flex-direction: column; font-size: 11px; color: #888; }
+  .hud-label { font-size: 9px; text-transform: uppercase; letter-spacing: 1px; }
+  .hud-item span:last-child { font-family: 'SF Mono', monospace; font-weight: 700; color: #fff; }
+  .hud-item.rec { color: #ff2a6d; }
+  .hud-item.rec.hidden { display: none; }
+
+  /* VICTOR: visor arriba, bien visible, borde rojo para saber que cargó el CSS */
+  #camera-wrap {
+    flex-shrink: 0;
+    width: 100%;
+    height: 52vh;           /* altura suficiente en iPhone */
+    min-height: 300px;
+    max-height: 450px;
+    background: #000;
+    border: 3px solid #ff0055;   /* borde rojo temporal para verificar */
+    border-radius: 12px;
+    margin: 12px env(safe-area-inset-left, 10px) 8px env(safe-area-inset-right, 10px);
+    position: relative;
+    overflow: hidden;
+  }
+  #glCanvas, #cameraVideo {
+    position: absolute; inset: 0; width: 100%; height: 100%;
+    object-fit: cover; display: block;
+  }
+  #cameraVideo { opacity: 0; }
+  #glCanvas { border: 2px solid rgba(0,242,255,0.5); }
+
+  /* Controles debajo, scrollables */
+  #controls {
+    flex: 1 1 auto;
+    overflow-y: auto;
+    -webkit-overflow-scrolling: touch;
+    padding: 8px env(safe-area-inset-left, 10px) 16px env(safe-area-inset-right, 10px);
+    padding-bottom: env(safe-area-inset-bottom, 16px);
+    background: #0a0a0a;
+  }
+
+  .panel {
+    background: #111;
+    border: 1px solid #222;
+    border-radius: 12px;
+    padding: 12px 14px;
+    margin-bottom: 12px;
+  }
+  .panel h3 {
+    margin: 0 0 10px; font-size: 13px; text-transform: uppercase;
+    letter-spacing: 1.5px; color: #00f2ff;
+    border-bottom: 1px solid #222; padding-bottom: 6px;
+  }
+  .row { display: flex; gap: 10px; align-items: center; margin-bottom: 10px; }
+  .row label { flex: 1; font-size: 13px; color: #fff; cursor: pointer; }
+  .row-check { align-items: flex-start; }
+  .row-check input { margin-top: 2px; }
+  span[id^="v"] { font-family: 'SF Mono', monospace; font-size: 12px; color: #888; min-width: 34px; text-align: right; }
+  .note { font-size: 11px; color: #888; margin-top: 6px; line-height: 1.4; }
+
+  .btn {
+    border: 1px solid #222; background: #161616; color: #fff;
+    padding: 10px 14px; border-radius: 8px; font-size: 14px; cursor: pointer;
+    font-family: inherit; width: 100%; text-align: left;
+  }
+  .btn:hover { border-color: #00f2ff; color: #00f2ff; }
+  .btn:active { transform: scale(0.97); }
+  .btn-primary { background: #007a8c; border-color: #007a8c; }
+  .btn-primary:hover { background: #00f2ff; color: #000; }
+  .btn-record { background: #ff2a6d; border-color: #ff2a6d; font-weight: 700; }
+  .btn-record.recording { animation: pulse 1.2s infinite; }
+  .btn-sm { padding: 8px 12px; font-size: 13px; width: 100%; }
+  @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.55} }
+
+  .preset-list { display: flex; flex-direction: column; gap: 6px; margin-top: 8px; }
+  .preset-list .btn-sm { width: auto; }
+
+  #status-box {
+    background: #0d0d0d; border: 1px solid #222; border-radius: 12px;
+    padding: 12px 14px; font-size: 12px;
+  }
+  #status-box h4 {
+    margin: 0 0 6px; font-size: 11px; text-transform: uppercase;
+    color: #888; letter-spacing: 1px;
+  }
+  #status-list { margin: 0; padding-left: 16px; color: #888; font-size: 12px; line-height: 1.5; }
+  #status-list li { margin: 2px 0; }
+
+  /* Overlay instalación */
+  .overlay {
+    position: fixed; inset: 0; z-index: 100;
+    background: rgba(10,10,10,0.85); display: flex;
+    align-items: center; justify-content: center;
+    padding: env(safe-area-inset-top, 8px) 8px env(safe-area-inset-bottom, 8px) 8px;
+  }
+  .overlay.hidden { display: none; }
+  .overlay-card {
+    background: #111; border: 1px solid #222; border-radius: 14px;
+    padding: 22px 24px; max-width: 320px; width: 90%; text-align: center;
+  }
+  .overlay-card h3 { margin: 0 0 10px; font-size: 17px; color: #00f2ff; }
+  .overlay-card p { margin: 0 0 14px; font-size: 13px; color: #888; line-height: 1.5; }
+  .overlay-card .row { display: flex; gap: 10px; justify-content: center; margin-bottom: 14px; }
+  .overlay-card .btn { flex: 1; text-align: center; }
+  ::-webkit-slider-thumb { accent-color: #00f2ff; }
+
+  @media (min-width: 768px) {
+    body { flex-direction: row; padding: 24px; align-items: flex-start; overflow-y: auto; }
+    #camera-wrap { width: 42vw; max-width: 520px; margin: 0; height: auto; aspect-ratio: 9/16; }
+    #controls { width: 340px; overflow-y: auto; padding-bottom: 0; }
+    header.app-header { position: sticky; top: 16px; }
+  }
+</style>
 </head>
 <body>
-  <header class="app-header">
-    <div class="brand">GLITCH LAB <span class="ver">v0.2 · Rotoscope + Light Tracking</span></div>
-    <div class="hud">
-      <div class="hud-item"><span class="hud-label">FPS</span><span id="hudFps">–</span></div>
-      <div class="hud-item"><span class="hud-label">LUZ</span><span id="hudLuma">–</span></div>
-      <div class="hud-item"><span class="hud-label">RES</span><span id="hudRes">–</span></div>
-      <div class="hud-item rec hidden" id="hudRec">● GRABANDO</div>
+
+<header class="app-header">
+  <div class="brand">GLITCH LAB <span class="ver">v0.2 · Rotoscope + Light Tracking</span></div>
+  <div class="hud">
+    <div class="hud-item"><span class="hud-label">FPS</span><span id="hudFps">–</span></div>
+    <div class="hud-item"><span class="hud-label">LUZ</span><span id="hudLuma">–</span></div>
+    <div class="hud-item"><span class="hud-label">RES</span><span id="hudRes">–</span></div>
+    <div class="hud-item rec hidden" id="hudRec">● GRABANDO</div>
+  </div>
+</header>
+
+<div id="camera-wrap">
+  <canvas id="glCanvas"></canvas>
+  <video id="cameraVideo" playsinline muted autoplay></video>
+</div>
+
+<div id="controls">
+  <section class="panel" id="panelCam">
+    <h3>Cámara</h3>
+    <div class="row"><button id="btnStart" class="btn btn-primary">Iniciar cámara</button></div>
+    <div class="row"><button id="btnToggleCam" class="btn">Cambiar cámara</button></div>
+    <div class="row"><label>Calidad de captura
+      <select id="selQuality">
+        <option value="720">720p</option>
+        <option value="1080" selected>1080p (historia IG)</option>
+        <option value="2160">4K (ideal, no garantizado en iOS)</option>
+      </select>
+    </label></div>
+    <div class="row"><label>Escala de render
+      <select id="selRenderScale">
+        <option value="1">1:1 — máxima calidad</option>
+        <option value="0.75" selected>3:4 — fluidez equilibrada</option>
+        <option value="0.5">1:2 — máxima fluidez</option>
+      </select>
+    </label></div>
+  </section>
+
+  <section class="panel" id="panelIsolate">
+    <h3>Aislamiento / Róscopia (llave de luminancia)</h3>
+    <div class="row"><label>Umbral <input type="range" id="sThreshold" min="0" max="1" step="0.01" value="0.55"><span id="vThreshold">0.55</span></label></div>
+    <div class="row"><label>Textura / ruido en umbral <input type="range" id="sNoiseAmt" min="0" max="1" step="0.01" value="0.18"><span id="vNoiseAmt">0.18</span></label></div>
+    <div class="row"><label class="row-check"><input type="checkbox" id="ckInvert"> Fondo limpio (invertir máscara)</label></div>
+    <p class="note">Aísla individuo u objeto por brillo.</p>
+  </section>
+
+  <section class="panel" id="panelMosaic">
+    <h3>Mosaicos según luz</h3>
+    <div class="row"><label>Intensidad <input type="range" id="sMosaic" min="0" max="1" step="0.01" value="0.45"><span id="vMosaic">0.45</span></label></div>
+    <div class="row"><label>Sensibilidad a la luz <input type="range" id="sMosaicSens" min="0" max="1" step="0.01" value="0.70"><span id="vMosaicSens">0.70</span></label></div>
+    <p class="note">El tamaño del bloque varía con la luminancia.</p>
+  </section>
+
+  <section class="panel" id="panelTrack">
+    <h3>Tracking por luz</h3>
+    <div class="row"><label>Seguir punto brillante <input type="range" id="sTrackSens" min="0" max="1" step="0.01" value="0.50"><span id="vTrackSens">0.50</span></label></div>
+    <p class="note">Sigue la zona más iluminada según la sensibilidad.</p>
+  </section>
+
+  <section class="panel" id="panelShapes">
+    <h3>Formas sensibles al movimiento</h3>
+    <div class="row"><label>Sensibilidad al movimiento <input type="range" id="sShapeMotion" min="0" max="1" step="0.01" value="0.65"><span id="vShapeMotion">0.65</span></label></div>
+    <p class="note">Distorsión vectorial por diferencia entre frames.</p>
+  </section>
+
+  <section class="panel" id="panelFlicker">
+    <h3>Flicker</h3>
+    <div class="row"><label>Intensidad <input type="range" id="sFlicker" min="0" max="1" step="0.01" value="0.30"><span id="vFlicker">0.30</span></label></div>
+    <p class="note">Parpadeo estocástico ligado a luz y movimiento.</p>
+  </section>
+
+  <section class="panel" id="panelSlide">
+    <h3>Slide (desplazamiento)</h3>
+    <div class="row"><label>X <input type="range" id="sSlideX" min="-1" max="1" step="0.01" value="0"><span id="vSlideX">0.00</span></label></div>
+    <div class="row"><label>Y <input type="range" id="sSlideY" min="-1" max="1" step="0.01" value="0"><span id="vSlideY">0.00</span></label></div>
+    <div class="row"><label>Suavizado <input type="range" id="sSlideSmooth" min="0" max="1" step="0.01" value="0.50"><span id="vSlideSmooth">0.50</span></label></div>
+  </section>
+
+  <section class="panel" id="panelRec">
+    <h3>Grabación y presets</h3>
+    <div class="row"><button id="btnRecord" class="btn btn-record">● Grabar historia (9:16)</button></div>
+    <div class="row"><button id="btnSavePreset" class="btn btn-sm">Guardar preset (IndexedDB)</button></div>
+    <div class="row"><button id="btnLoadPreset" class="btn btn-sm">Cargar preset</button></div>
+    <div id="presetList" class="preset-list"></div>
+    <p class="note">Descarga WebM. En iOS Safari el códec depende de la versión.</p>
+  </section>
+
+  <div id="status-box">
+    <h4>Estado técnico (honesto)</h4>
+    <ul id="status-list"></ul>
+  </div>
+</div>
+
+<div class="overlay hidden" id="overlayInstall">
+  <div class="overlay-card">
+    <h3>Instalar como app</h3>
+    <p>En iPhone: <strong>Compartir → A la pantalla de inicio</strong>.</p>
+    <div class="row">
+      <button id="btnInstall" class="btn btn-primary">Instalar (Android/Chrome)</button>
+      <button id="btnCloseInstall" class="btn">Cerrar</button>
     </div>
-  </header>
+    <p class="note">La PWA requiere HTTPS para cámara en iOS.</p>
+  </div>
+</div>
 
-  <main class="stage">
-    <div class="viewfinder">
-      <canvas id="glCanvas" class="gl-canvas"></canvas>
-      <video id="cameraVideo" playsinline muted autoplay></video>
-      <div class="corner top-left">CAM</div>
-      <div class="corner top-right">9:16 · IG STORY</div>
-      <div class="corner bottom-left">GPU · WEBGL 2</div>
-      <div class="corner bottom-right">PWA</div>
-    </div>
-
-    <section class="panel" id="panelCam">
-      <h3>Cámara</h3>
-      <div class="row"><button id="btnStart" class="btn btn-primary">Iniciar cámara</button></div>
-      <div class="row"><button id="btnToggleCam" class="btn">Cambiar cámara</button></div>
-      <div class="row"><label>Calidad de captura
-        <select id="selQuality">
-          <option value="720">720p</option>
-          <option value="1080" selected>1080p (historia IG)</option>
-          <option value="2160">4K (ideal, no garantizado en iOS)</option>
-        </select>
-      </label></div>
-      <div class="row"><label>Escala de render
-        <select id="selRenderScale">
-          <option value="1">1:1 — máxima calidad (1080×1920)</option>
-          <option value="0.75" selected>3:4 — fluidez equilibrada</option>
-          <option value="0.5">1:2 — máxima fluidez</option>
-        </select>
-      </label></div>
-    </section>
-
-    <section class="panel" id="panelIsolate">
-      <h3>Aislamiento / Róscopia (llave de luminancia)</h3>
-      <div class="row"><label>Umbral <input type="range" id="sThreshold" min="0" max="1" step="0.01" value="0.55"><span id="vThreshold">0.55</span></label></div>
-      <div class="row"><label>Textura / ruido en umbral <input type="range" id="sNoiseAmt" min="0" max="1" step="0.01" value="0.18"><span id="vNoiseAmt">0.18</span></label></div>
-      <div class="row"><label class="row-check"><input type="checkbox" id="ckInvert"> Fondo limpio (invertir máscara)</label></div>
-      <p class="note">Aísla individuo u objeto por brillo. Cada objeto nuevo que entre al encuadre se aísla automáticamente.</p>
-    </section>
-
-    <section class="panel" id="panelMosaic">
-      <h3>Mosaicos según luz</h3>
-      <div class="row"><label>Intensidad <input type="range" id="sMosaic" min="0" max="1" step="0.01" value="0.45"><span id="vMosaic">0.45</span></label></div>
-      <div class="row"><label>Sensibilidad a la luz <input type="range" id="sMosaicSens" min="0" max="1" step="0.01" value="0.70"><span id="vMosaicSens">0.70</span></label></div>
-      <p class="note">El tamaño del bloque no es uniforme: varía con la luminancia de la escena.</p>
-    </section>
-
-    <section class="panel" id="panelTrack">
-      <h3>Tracking por luz</h3>
-      <div class="row"><label>Seguir punto brillante <input type="range" id="sTrackSens" min="0" max="1" step="0.01" value="0.50"><span id="vTrackSens">0.50</span></label></div>
-      <p class="note">Sigue la zona más iluminada; la sensibilidad regula qué tan rápido se mueve el seguimiento.</p>
-    </section>
-
-    <section class="panel" id="panelShapes">
-      <h3>Formas sensibles al movimiento</h3>
-      <div class="row"><label>Sensibilidad al movimiento <input type="range" id="sShapeMotion" min="0" max="1" step="0.01" value="0.65"><span id="vShapeMotion">0.65</span></label></div>
-      <p class="note">Distorsión vectorial generada por la diferencia entre frames (movimiento real).</p>
-    </section>
-
-    <section class="panel" id="panelFlicker">
-      <h3>Flicker</h3>
-      <div class="row"><label>Intensidad <input type="range" id="sFlicker" min="0" max="1" step="0.01" value="0.30"><span id="vFlicker">0.30</span></label></div>
-      <p class="note">Parpadeo estocástico ligado a luz y movimiento.</p>
-    </section>
-
-    <section class="panel" id="panelSlide">
-      <h3>Slide (desplazamiento)</h3>
-      <div class="row"><label>X <input type="range" id="sSlideX" min="-1" max="1" step="0.01" value="0"><span id="vSlideX">0.00</span></label></div>
-      <div class="row"><label>Y <input type="range" id="sSlideY" min="-1" max="1" step="0.01" value="0"><span id="vSlideY">0.00</span></label></div>
-      <div class="row"><label>Suavizado <input type="range" id="sSlideSmooth" min="0" max="1" step="0.01" value="0.50"><span id="vSlideSmooth">0.50</span></label></div>
-    </section>
-
-    <section class="panel" id="panelRec">
-      <h3>Grabación y presets</h3>
-      <div class="row"><button id="btnRecord" class="btn btn-record">● Grabar historia (9:16)</button></div>
-      <div class="row"><button id="btnSavePreset" class="btn btn-sm">Guardar preset (IndexedDB)</button></div>
-      <div class="row"><button id="btnLoadPreset" class="btn btn-sm">Cargar preset</button></div>
-      <div id="presetList" class="preset-list"></div>
-      <p class="note">Descarga WebM. En iOS Safari el códec depende del versión (VP8/H.264).</p>
-    </section>
-
-    <div class="status-box">
-      <h4>Estado técnico (honesto)</h4>
-      <ul class="status-list" id="statusList"></ul>
-    </div>
-
-    <div class="overlay hidden" id="overlayInstall">
-      <div class="overlay-card">
-        <h3>Instalar como app</h3>
-        <p>En iPhone: <strong>Compartir → A la pantalla de inicio</strong>. En Android/Chrome aparecerá abajo el botón de instalación.</p>
-        <div class="row">
-          <button id="btnInstall" class="btn btn-primary">Instalar (Android/Chrome)</button>
-          <button id="btnCloseInstall" class="btn">Cerrar</button>
-        </div>
-        <p class="note">La PWA requiere HTTPS para usar cámara y grabar en iOS. En tu PC puedes probarlo sobre HTTP.</p>
-      </div>
-    </div>
-  </main>
-
-  <script src="js/shaders.js"></script>
-  <script src="js/app.js"></script>
+<script src="js/shaders.js"></script>
+<script src="js/app.js"></script>
 </body>
 </html>
